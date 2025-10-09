@@ -1,61 +1,107 @@
-from transformers import AutoTokenizer, AutoModelForSequenceClassification, Trainer, TrainingArguments
-from datasets import load_dataset
-import numpy as np
-import evaluate
+import os
+import nltk
+from sentence_transformers import SentenceTransformer, util
+import pysbd
+import language_tool_python
 
+# Optional environment setup (prevents tokenizer parallelism warnings)
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
-dataset = load_dataset("csv", data_files="essaygrader_data.csv")
+# Make sure nltk data is available
+nltk.download('punkt', download_dir='/tmp')
 
+# Load SentenceTransformer model (RoBERTa-based)
+print("Loading SentenceTransformer model...")
+model = SentenceTransformer('sentence-transformers/roberta-base-nli-mean-tokens')
 
-tokenizer = AutoTokenizer.from_pretrained("FacebookAI/roberta-base")
-model = AutoModelForSequenceClassification.from_pretrained(
-    "FacebookAI/roberta-base",
-    num_labels=11  # scores 0–10 = 11 classes
-)
+# Example reflective templates
+reflection_templates = [
+    "I learned something important about myself.",
+    "That experience changed me.",
+    "I grew from that challenge.",
+    "I gained a new perspective.",
+    "I became more self-aware.",
+    "It taught me a lesson.",
+    "I realized something I hadn't before.",
+    "This helped me understand myself better.",
+]
 
+# Encode the reflection templates
+print("Encoding reflection templates...")
+template_embeddings = model.encode(reflection_templates, convert_to_tensor=True)
 
-def preprocess(examples):
-    return tokenizer(examples["Essay"], truncation=True, padding="max_length", max_length=256)
+# Your essay text — replace this with user input or load from a file
+essay_text = """
+I used to hate group projects because I preferred working alone.
+But after joining the robotics team, I realized that collaboration brings out the best in everyone.
+I learned how to trust my teammates and communicate better.
+This experience changed how I view leadership and teamwork.
+"""
 
-tokenized_dataset = dataset.map(preprocess, batched=True)
+# Sentence segmentation using pysbd
+print("Segmenting sentences...")
+seg = pysbd.Segmenter(language="en", clean=True)
+sentences = seg.segment(essay_text)
 
+# Encode each sentence
+print("Encoding essay sentences...")
+sentence_embeddings = model.encode(sentences, convert_to_tensor=True)
 
-if "train" not in tokenized_dataset:
-    tokenized_dataset = tokenized_dataset["train"].train_test_split(test_size=0.2)
+# Calculate similarity to reflection templates
+reflective_sentences = []
+threshold = 0.6
+total_reflective = 0
 
-# Load shit
-accuracy = evaluate.load("accuracy")
+for i, sentence in enumerate(sentences):
+    sim_scores = util.cos_sim(sentence_embeddings[i], template_embeddings)
+    max_score = sim_scores.max().item()
 
-def compute_metrics(p):
-    preds = np.argmax(p.predictions, axis=1)
-    return accuracy.compute(predictions=preds, references=p.label_ids)
+    if max_score > threshold:
+        reflective_sentences.append((sentence, round(max_score, 3)))
+        total_reflective += 1
 
-# setup training
-training_args = TrainingArguments(
-    output_dir="./results",
-    evaluation_strategy="epoch",
-    save_strategy="epoch",
-    learning_rate=2e-5,
-    per_device_train_batch_size=8,
-    per_device_eval_batch_size=8,
-    num_train_epochs=3,
-    weight_decay=0.01,
-    logging_dir="./logs",
-)
+# Calculate reflection score (percentage)
+reflection_score = round((total_reflective / len(sentences)) * 100, 2)
 
-trainer = Trainer(
-    model=model,
-    args=training_args,
-    train_dataset=tokenized_dataset["train"],
-    eval_dataset=tokenized_dataset["test"],
-    tokenizer=tokenizer,
-    compute_metrics=compute_metrics,
-)
+# Display results
+print("\n===============================")
+print(f" Reflection Score: {reflection_score}/100")
+print("===============================")
+print("\n Reflective Sentences Detected:")
 
-# train it
-trainer.train()
+if reflective_sentences:
+    for sent, sim in reflective_sentences:
+        print(f"- \"{sent}\" (similarity: {sim})")
+else:
+    print("No strongly reflective sentences found.")
 
-# save it
-trainer.save_model("./essay_scoring_model")
+print("\nAnalysis complete.")
 
-print("yayaya passed")
+#### GRAMMAR SECTION
+
+def analyze_grammar(essay_text):
+
+    tool = language_tool_python.LanguageTool('en-US')
+
+    matches = tool.check(essay_text)
+    num_errors = len(matches)
+    word_count = len(essay_text.split())
+    
+    if word_count == 0:
+        return {"grammar_score": 0, "num_errors": 0, "example_error": "No text provided."}
+
+    # Softer penalty curve for short essays
+    penalty = (num_errors / word_count) * 500
+    grammar_score = max(0, 100 - penalty)
+
+    feedback = {
+        "grammar_score": round(grammar_score, 2),
+        "num_errors": num_errors,
+        "example_error": matches[0].message if matches else "No errors detected."
+    }
+    return feedback
+
+essay_text = """This is an example text with speling mistackes."""
+
+grammar_results = analyze_grammar(essay_text)
+print(grammar_results)
