@@ -1,107 +1,117 @@
-import os
-import nltk
+# ==========================
+# Essay Grader (Semantic AI Version)
+# ==========================
 from sentence_transformers import SentenceTransformer, util
 import pysbd
-import language_tool_python
+import textstat
 
-# Optional environment setup (prevents tokenizer parallelism warnings)
-os.environ["TOKENIZERS_PARALLELISM"] = "false"
+# ==========================
+#  Load Model
+# ==========================
+def load_model():
+    print("Loading model...")
+    model = SentenceTransformer('sentence-transformers/roberta-base-nli-mean-tokens')
+    print("Model loaded successfully!\n")
+    return model
 
-# Make sure nltk data is available
-nltk.download('punkt', download_dir='/tmp')
 
-# Load SentenceTransformer model (RoBERTa-based)
-print("Loading SentenceTransformer model...")
-model = SentenceTransformer('sentence-transformers/roberta-base-nli-mean-tokens')
+# ==========================
+#  Input Handling 
+# ==========================
+def get_essay_input():
+    print("Enter your essay below (press Enter when done):")
+    essay = input("> ").strip()
 
-# Example reflective templates
-reflection_templates = [
-    "I learned something important about myself.",
-    "That experience changed me.",
-    "I grew from that challenge.",
-    "I gained a new perspective.",
-    "I became more self-aware.",
-    "It taught me a lesson.",
-    "I realized something I hadn't before.",
-    "This helped me understand myself better.",
-]
+    # Optional fallback: load from essay.txt if user presses Enter
+    if not essay:
+        try:
+            with open("essay.txt", "r", encoding="utf-8") as f:
+                essay = f.read().strip()
+                print("Loaded essay from essay.txt\n")
+        except FileNotFoundError:
+            print("No essay entered or found in essay.txt. Exiting.")
+            exit()
+    return essay
 
-# Encode the reflection templates
-print("Encoding reflection templates...")
-template_embeddings = model.encode(reflection_templates, convert_to_tensor=True)
 
-# Your essay text — replace this with user input or load from a file
-essay_text = """
-I used to hate group projects because I preferred working alone.
-But after joining the robotics team, I realized that collaboration brings out the best in everyone.
-I learned how to trust my teammates and communicate better.
-This experience changed how I view leadership and teamwork.
-"""
+# ==========================
+#  Preprocess Essay
+# ==========================
+def preprocess_essay(essay, model):
+    seg = pysbd.Segmenter(language="en", clean=True)
+    sentences = seg.segment(essay)
+    embeddings = model.encode(sentences, convert_to_tensor=True)
+    return sentences, embeddings
 
-# Sentence segmentation using pysbd
-print("Segmenting sentences...")
-seg = pysbd.Segmenter(language="en", clean=True)
-sentences = seg.segment(essay_text)
 
-# Encode each sentence
-print("Encoding essay sentences...")
-sentence_embeddings = model.encode(sentences, convert_to_tensor=True)
+# ==========================
+#  Semantic Scoring Helpers
+# ==========================
+def score_with_reference(model, sentences, sentence_embeddings, reference_texts):
+    ref_embeddings = model.encode(reference_texts, convert_to_tensor=True)
+    sims = util.cos_sim(sentence_embeddings, ref_embeddings)
+    avg_similarity = sims.max(dim=1).values.mean().item()
+    return round(avg_similarity * 100, 2)
 
-# Calculate similarity to reflection templates
-reflective_sentences = []
-threshold = 0.6
-total_reflective = 0
 
-for i, sentence in enumerate(sentences):
-    sim_scores = util.cos_sim(sentence_embeddings[i], template_embeddings)
-    max_score = sim_scores.max().item()
+# ==========================
+#  Category-Based Scoring
+# ==========================
+def semantic_scores(essay, model):
+    sentences, embeddings = preprocess_essay(essay, model)
 
-    if max_score > threshold:
-        reflective_sentences.append((sentence, round(max_score, 3)))
-        total_reflective += 1
-
-# Calculate reflection score (percentage)
-reflection_score = round((total_reflective / len(sentences)) * 100, 2)
-
-# Display results
-print("\n===============================")
-print(f" Reflection Score: {reflection_score}/100")
-print("===============================")
-print("\n Reflective Sentences Detected:")
-
-if reflective_sentences:
-    for sent, sim in reflective_sentences:
-        print(f"- \"{sent}\" (similarity: {sim})")
-else:
-    print("No strongly reflective sentences found.")
-
-print("\nAnalysis complete.")
-
-#### GRAMMAR SECTION
-
-def analyze_grammar(essay_text):
-
-    tool = language_tool_python.LanguageTool('en-US')
-
-    matches = tool.check(essay_text)
-    num_errors = len(matches)
-    word_count = len(essay_text.split())
-    
-    if word_count == 0:
-        return {"grammar_score": 0, "num_errors": 0, "example_error": "No text provided."}
-
-    # Softer penalty curve for short essays
-    penalty = (num_errors / word_count) * 500
-    grammar_score = max(0, 100 - penalty)
-
-    feedback = {
-        "grammar_score": round(grammar_score, 2),
-        "num_errors": num_errors,
-        "example_error": matches[0].message if matches else "No errors detected."
+    # Define criteria and example reference texts
+    categories = {
+        "Compelling Story": [
+            "I overcame a personal challenge that changed me.",
+            "This story reveals who I am through action."
+        ],
+        "Reflection & Growth": [
+            "I learned something meaningful about myself.",
+            "This experience helped me grow as a person."
+        ],
+        "Unique Voice": [
+            "My essay feels authentic and personal.",
+            "It expresses my individuality and unique perspective."
+        ],
+        "School Fit": [
+            "I align with the university’s mission and community.",
+            "I explain how I would contribute to the campus."
+        ],
+        "Writing & Craft": [
+            "The essay is clear, engaging, and well structured.",
+            "It has a strong opening and maintains focus throughout."
+        ],
     }
-    return feedback
 
-essay_text = """This is an example text with speling mistackes."""
+    # Semantic scores
+    results = {cat: score_with_reference(model, sentences, embeddings, refs)
+               for cat, refs in categories.items()}
 
-grammar_results = analyze_grammar(essay_text)
-print(grammar_results)
+    # Add readability as part of Writing & Craft
+    readability = textstat.flesch_reading_ease(essay)
+    readability_score = min(max((readability / 100) * 100, 0), 100)
+    results["Writing & Craft"] = round((results["Writing & Craft"] * 0.8 + readability_score * 0.2), 2)
+
+    # Overall average
+    results["Overall"] = round(sum(results.values()) / len(results), 2)
+    return results
+
+
+# ==========================
+#  Main Execution
+# ==========================
+if __name__ == "__main__":
+    model = load_model()
+    essay = get_essay_input()
+    results = semantic_scores(essay, model)
+
+    print("\n=== Essay Evaluation ===")
+    for k, v in results.items():
+        print(f"{k}: {v}%")
+
+    print("\nGrading complete!")
+
+
+
+
